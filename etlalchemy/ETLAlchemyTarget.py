@@ -20,7 +20,7 @@ class ETLAlchemyTarget():
             # (useful during testing w/ multiple log_files)
             self.logger.removeHandler(h)
         handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(name)s (%levelname)s) - %(message)s')
+        logging.Formatter('%(name)s (%levelname)s) - %(message)s')
         self.logger.addHandler(handler)
         self.logger.setLevel(logging.INFO)
     # Add an ETLAlchemySource to the list of 'sources'
@@ -36,6 +36,7 @@ class ETLAlchemyTarget():
         try:
             self.dst_engine = create_engine(self.conn_string)
         except ImportError as e:
+            print(e)
             raise DBApiNotFound(self.conn_string)
         if self.drop_database:
             self.logger.info(self.dst_engine.dialect.name)
@@ -46,20 +47,14 @@ class ETLAlchemyTarget():
             if self.dst_engine.dialect.name.upper() == "MSSQL":
                 db_name = list(self.dst_engine.execute(
                     "SELECT DB_NAME()").fetchall())[0][0]
-                self.logger.warning(
-                        "Can't drop database {0} on MSSQL, " +
-                        "dropping tables instead...".format(db_name))
+                self.logger.warning("Can't drop database {0} on MSSQL, dropping tables instead...".format(db_name))
                 m = MetaData()
                 m.bind = self.dst_engine
                 m.reflect()
                 m.drop_all()
             elif self.dst_engine.dialect.name.upper() == "ORACLE":
-                db_name = list(self.dst_engine.execute(
-                    "SELECT SYS_CONTEXT('userenv','db_name') " +
-                    "FROM DUAL").fetchall())[0][0]
-                self.logger.warning(
-                        "Can't drop database {0} on ORACLE, " +
-                        "dropping tables instead...".format(db_name))
+                db_name = list(self.dst_engine.execute("SELECT SYS_CONTEXT('userenv','db_name') FROM DUAL").fetchall())[0][0]
+                self.logger.warning("Can't drop database {0} on ORACLE, dropping tables instead...".format(db_name))
                 m = MetaData()
                 m.bind = self.dst_engine
                 m.reflect()

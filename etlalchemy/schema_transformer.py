@@ -12,8 +12,7 @@ class SchemaTransformer():
             self.new_table = stRow['New Table Name']
 
         def __str__(self):
-            return "({0} -> {1}...Delete = {2})".\
-                format(self.old_table, self.new_table, str(self.delete))
+            return f'({self.old_table} -> {self.new_table}...Delete = {str(self.delete)})'
 
     class ColumnTransformation():
         def __init__(self, stRow):
@@ -28,14 +27,9 @@ class SchemaTransformer():
 
         def __str__(self):
             return self.old_table + "." + self.old_column
+
     def schedule_deletion_of_column(self, col, table):
-        st = self.ColumnTransformation({
-            'Delete': "true",
-            'Table Name': table,
-            'Column Name': col,
-            'New Column Name': '',
-            'New Column Type': ''
-        })
+        st = self.ColumnTransformation({'Delete': "true", 'Table Name': table, 'Column Name': col, 'New Column Name': '', 'New Column Type': ''})
         self.logger.info("Scheduling '{0}' to be deleted due to column being empty".format(col))
         if not self.column_transformations.get(st.old_table):
             # No column transformations exist for the table
@@ -49,8 +43,7 @@ class SchemaTransformer():
             # Transformations exist on the table, not nothing on the column
             self.column_transformations[st.old_table][st.old_column] = st
 
-    def __init__(self, column_transform_file,
-                 table_transform_file, global_renamed_col_suffixes={}):
+    def __init__(self, column_transform_file, table_transform_file, global_renamed_col_suffixes={}):
         self.logger = logging.getLogger("schema-transformer")
         handler = logging.StreamHandler()
         formatter = logging.Formatter('%(name)s (%(levelname)s) - %(message)s')
@@ -68,8 +61,9 @@ class SchemaTransformer():
                 dr = csv.DictReader(fp)
                 for row in dr:
                     st = self.ColumnTransformation(row)
-                    if not self.column_transformations.get(st.old_table):
-                        self.column_transformations[st.old_table] = {}
+                    self.column_transformations.setdefault(st.old_table, {})
+                    # if not self.column_transformations.get(st.old_table):
+                        # self.column_transformations[st.old_table] = {}
                     self.column_transformations[st.old_table][st.old_column] = st
         # Load table mappings
         if table_transform_file:
@@ -87,9 +81,7 @@ class SchemaTransformer():
             if thisTableTT.delete:
                 return False
             if thisTableTT.new_table not in ["", None]:
-                self.logger.info(
-                    " ----> Renaming table '{0}' to '{1}'"
-                    .format(table.name, thisTableTT.new_table))
+                self.logger.info(" ----> Renaming table '{0}' to '{1}'".format(table.name, thisTableTT.new_table))
                 table.name = thisTableTT.new_table
                 return True
         return True
@@ -112,9 +104,7 @@ class SchemaTransformer():
                 else:
                     # Rename the column if a "New Column Name" is specificed
                     if st.new_column not in ["", None]:
-                        self.logger.info(
-                            " ----> Renaming column '{0}' => '{1}'"
-                            .format(C.name, st.new_column))
+                        self.logger.info(" ----> Renaming column '{0}' => '{1}'".format(C.name, st.new_column))
                         C.name = st.new_column
                         columns[idx] = C.name
                         action_applied = True
@@ -125,32 +115,19 @@ class SchemaTransformer():
                         try:
                             C.type = st._new_type()
                         except Exception as e:
-                            self.logger.critical(
-                                "** Couldn't change column type of " +
-                                "'{0}' to '{1}'**".
-                                format(C.name, st.new_type))
+                            self.logger.critical("** Couldn't change column type of '{0}' to '{1}'**".format(C.name, st.new_type))
                             self.logger.critical(e)
                             raise e
                     else:
-                        self.logger.warning(
-                            "Schema transformation defined for " +
-                            "column '{0}', but no action was " +
-                            "taken...".format(C.name))
+                        self.logger.warning("Schema transformation defined for column '{0}', but no action was taken...".format(C.name))
 
         if not action_applied:
             # Then the column had no 'action' applied to it...
             for k in self.global_renamed_col_suffixes.keys():
                 # Check if column name ends with specfiic suffix
                 if initial_column_name.lower().endswith(k.lower()):
-                    self.logger.info(
-                        " ---> Renaming column '{0}' to GLOBAL " +
-                        " default '{1}' because it contains '{2}'"
-                        .format(initial_column_name.lower(),
-                                initial_column_name.replace(
-                                    k, self.global_renamed_col_suffixes[k]),
-                                k.lower()))
-                    C.name = initial_column_name.replace(
-                            k, self.global_renamed_col_suffixes[k])
+                    self.logger.info(" ---> Renaming column '{0}' to GLOBAL default '{1}' because it contains '{2}'".format(initial_column_name.lower(), initial_column_name.replace(k, self.global_renamed_col_suffixes[k]), k.lower()))
+                    C.name = initial_column_name.replace(k, self.global_renamed_col_suffixes[k])
                     columns[idx] = C.name
         return columns
 

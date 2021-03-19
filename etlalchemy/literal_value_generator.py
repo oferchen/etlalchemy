@@ -1,16 +1,12 @@
 import shutil
 import decimal
 import datetime
-# Find the best implementation available on this platform
-try:
-    from cStringIO import StringIO
-except:
-    from StringIO import StringIO
+from io import StringIO
 
 def _generate_literal_value_for_csv(value, dialect):
     dialect_name = dialect.name.lower()
     
-    if isinstance(value, basestring):
+    if isinstance(value, str):
         if dialect_name in ['sqlite', 'mssql']:
             # No support for 'quote' enclosed strings
             return "%s" % value
@@ -21,7 +17,7 @@ def _generate_literal_value_for_csv(value, dialect):
         return "NULL"
     elif isinstance(value, bool):
         return "%s" % int(value)
-    elif isinstance(value, (float, int, long)):
+    elif isinstance(value, (float, int)):
         return "%s" % value
     elif isinstance(value, decimal.Decimal):
         return str(value)
@@ -80,14 +76,14 @@ def _generate_literal_value_for_csv(value, dialect):
 
 def _generate_literal_value(value, dialect):
     dialect_name = dialect.name.lower()
-    if isinstance(value, basestring):
+    if isinstance(value, str):
         value = value.replace("'", "''")
         return "'%s'" % value
     elif value is None:
         return "NULL"
     elif isinstance(value, bool):
         return "%s" % int(value)
-    elif isinstance(value, (float, int, long)):
+    elif isinstance(value, (float, int)):
         return "%s" % value
     elif isinstance(value, decimal.Decimal):
         return str(value)
@@ -164,7 +160,6 @@ def dump_to_oracle_insert_statements(fp, engine, table, raw_rows, columns):
 
 # Supported by [MySQL, Postgresql, sqlite, SQL server (non-Azure) ]
 def dump_to_csv(fp, table_name, columns, raw_rows, dialect):
-    lines = []
     separator = ","
     # Determine the separator based on Target DB 
     if dialect.name.lower() in ["sqlite"]:

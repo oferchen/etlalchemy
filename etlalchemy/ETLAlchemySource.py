@@ -1,7 +1,6 @@
 import codecs
 from itertools import islice
-from literal_value_generator import dump_to_sql_statement, dump_to_csv,\
-    dump_to_oracle_insert_statements
+from literal_value_generator import dump_to_sql_statement, dump_to_csv, dump_to_oracle_insert_statements
 import random
 from migrate.changeset.constraint import ForeignKeyConstraint
 from datetime import datetime
@@ -21,7 +20,7 @@ from sqlalchemy.engine import reflection
 from sqlalchemy.inspection import inspect
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.types import Text, Numeric, BigInteger, Integer, DateTime, Date, TIMESTAMP, String, BINARY, LargeBinary
-from sqlalchemy.dialects.postgresql import BYTEA
+from sqlalchemy.dialects.postgresql import BYTEA, UUID
 import inspect as ins
 import re
 import csv
@@ -50,7 +49,8 @@ class ETLAlchemySource():
                  skip_table_if_empty=False,
                  skip_column_if_empty=False,
                  compress_varchar=False,
-                 log_file=None):
+                 log_file=None,
+                 per_table_buffers={}):
         # TODO: Store unique columns in here, and ADD the unique constraints
         # after data has been migrated, rather than before
         self.unique_columns = []
@@ -58,7 +58,9 @@ class ETLAlchemySource():
         
         self.logger = logging.getLogger("ETLAlchemySource")
         self.logger.propagate = False
-        
+        #Allow specifying of buffer size on a per-table basis when fetching rows from the source
+        self.per_table_buffers = per_table_buffers
+
         for h in list(self.logger.handlers):
             # Clean up any old loggers...(useful during testing w/ multiple
             # log_files)
@@ -205,6 +207,17 @@ class ETLAlchemySource():
             # Get the VARCHAR size of the column...
             ########################################
             varchar_length = column.type.length
+            if varchar_length == 'max':
+                # If varchar_length exceeds the maximum size for our target
+                # database, then convert VARCHAR -> TEXT  
+                if self.dst_engine.dialect.name.lower() == "postgresql":
+                    if varchar_length == 'max' or varchar_length > 10485760:
+                        varchar_length = 0
+                elif self.dst_engine.dialect.name.lower() == "mssql":
+                    if varchar_length == 'max' or varchar_length > 65532:
+                        # Note: This isn't always the case for mssql!
+                        # If using utf8, the limit is 21844. 
+                        varchar_length = 0
             ##################################
             # Strip collation here ...
             ##################################
@@ -217,10 +230,10 @@ class ETLAlchemySource():
                     # Update varchar(size)
                     if len(data) > max_data_length:
                         max_data_length = len(data)
-                    if isinstance(row[idx], unicode):
-                        row[idx] = row[idx].encode('utf-8', 'ignore')
-                    else:
-                        row[idx] = row[idx].decode('utf-8', 'ignore').encode('utf-8')
+                    # if isinstance(row[idx], unicode):
+                    #     row[idx] = row[idx].encode('utf-8', 'ignore')
+                    # else:
+                    #     row[idx] = row[idx].decode('utf-8', 'ignore').encode('utf-8')
             if self.compress_varchar:
                 # Let's reduce the "n" in VARCHAR(n) to a power of 2
                 if max_data_length > 0:
@@ -249,8 +262,20 @@ class ETLAlchemySource():
             # Get the VARCHAR size of the column...
             ########################################
             varchar_length = column.type.length
-            column_copy.type = String()
-            column_copy.type.length = varchar_length
+            if varchar_length == 'max':
+                varchar_length = 0
+                column_copy.type = Text()
+            elif self.dst_engine.dialect.name.lower() == "postgresql" and varchar_length > 10485760:
+                    varchar_length = 0
+                    column_copy.type = Text()
+            elif self.dst_engine.dialect.name.lower() == "mssql" and varchar_length > 65532:
+                    # Note: This isn't always the case for mssql!
+                    # If using utf8, the limit is 21844. 
+                    varchar_length = 0
+                    column_copy.type = Text()
+            else:
+                column_copy.type = String()
+                column_copy.type.length = varchar_length
             ##################################
             # Strip collation here ...
             ##################################
@@ -263,8 +288,8 @@ class ETLAlchemySource():
                             column.name, str(varchar_length)))
                 if data is not None:
                     null = False
-                    if isinstance(row[idx], unicode):
-                        row[idx] = row[idx].encode('utf-8', 'ignore')
+                    # if isinstance(row[idx], unicode):
+                    #     row[idx] = row[idx].encode('utf-8', 'ignore')
                 #if row[idx]:
                 #    row[idx] = row[idx].decode('utf-8', 'ignore')
 
@@ -325,8 +350,8 @@ class ETLAlchemySource():
                 ######################
                 if data is not None:
                     null = False
-                if data.__class__.__name__ == 'Decimal' or\
-                   data.__class__.__name__ == 'float':
+                if data.__class__.__name__ == 'Decimal' or data.__class__.__name__ == 'float':
+                    continue # TODO. chamilton 22 April 2019: Skip this part entirely. Not ready to modify/remove/etc. just yet.
                     splt = str(data).split(".")
                     if len(splt) == 1:
                         intCount += 1
@@ -380,13 +405,13 @@ class ETLAlchemySource():
                     column.name +
                     "' is of type 'Decimal', but contains no mantissas " +
                     "> 0. (i.e. 3.00, 2.00, etc..)\n ")
-                if maxDigit > 4294967295:
+                if maxDigit > 4294967295: # TODO. chamilton 22 April 2019: Not sure if this is necessary. 
                     self.logger.warning("Coercing to 'BigInteger'")
                     column_copy.type = BigInteger()
                     # Do conversion...
                     for r in raw_rows:
                         if r[idx] is not None:
-                            r[idx] = long(r[idx])
+                            r[idx] = BigInteger((r[idx]))
                 else:
                     column_copy.type = Integer()
                     self.logger.warning("Coercing to 'Integer'")
@@ -401,6 +426,9 @@ class ETLAlchemySource():
                 "coercing to Boolean'")
             column_copy.type.__class__ = sqlalchemy.types.Boolean
         elif "TYPEENGINE" in base_classes:
+            if self.dst_engine.dialect.name.lower() == "postgresql" and column.type.__class__.__name__ == "UNIQUEIDENTIFIER":
+                column_copy.type = UUID()
+                self.logger.warning("Found column of type 'UNIQUEIDENTIFIER' -> coercing to 'UUID'")
             for r in raw_rows:
                 if r[idx] is not None:
                     null = False
@@ -530,9 +558,7 @@ class ETLAlchemySource():
         (i.e. change the table's name)
         """
         if not self.schema_transformer.transform_table(T):
-            self.logger.info(
-                " ---> Table ({0}) is scheduled to be deleted " +
-                "according to table transformations...".format(T.name))
+            self.logger.info(" ---> Table ({0}) is scheduled to be deleted according to table transformations...".format(T.name))
             # Clean up FKs and Indexes on this table...
             del self.indexes[T.name]
             del self.fks[T.name]
@@ -595,9 +621,7 @@ class ETLAlchemySource():
                             T.name, e))
                     raise
             else:
-                self.logger.warning(
-                    "Table '{0}' already exists - not creating table, " +
-                    "reflecting to get new changes instead..".format(T.name))
+                self.logger.warning("Table '{0}' already exists - not creating table, reflecting to get new changes instead..".format(T.name))
                 self.tgt_insp.reflecttable(T, None)
                 return True
                 # We need to Upsert the data...
@@ -665,7 +689,7 @@ class ETLAlchemySource():
             host = self.dst_engine.url.host
             self.logger.info(
                 "Sending data to target MySQL instance...(Fast [mysqlimport])")
-            columns = map(lambda c: "\`{0}\`".format(c), columns)
+            columns = map(lambda c: r'`{0}`'.format(c), columns)
             cmd = ("mysqlimport -v -h{0} -u{1} -p{2} "
                        "--compress "
                        "--local "
@@ -702,14 +726,8 @@ class ETLAlchemySource():
             cur = conn.cursor()
             # Legacy method (doesn't work if not superuser, and if file is
             # LOCAL
-            cmd = """COPY {0} ({1}) FROM '{2}'
-                    WITH CSV QUOTE ''''
-                    ESCAPE '\\' """.format(
-                table, ",".join(columns), data_file_path, "'")
-            self.logger.info(
-                "Sending data to target Postgresql instance..." +
-                "(Fast [COPY ... FROM ... WITH CSV]):" +
-                "\n ----> {0}".format(cmd))
+            cmd = "COPY {0} ({1}) FROM '{2}' WITH CSV QUOTE '''' ESCAPE '\\' ".format(table, ",".join(columns), data_file_path)
+            self.logger.info("Sending data to target Postgresql instance...(Fast [COPY ... FROM ... WITH CSV]):\n ----> {0}".format(cmd))
             with open(data_file_path, 'r') as fp_psql:
                 # Most use command below, which loads data_file from STDIN to
                 # work-around permissions issues...
@@ -717,8 +735,7 @@ class ETLAlchemySource():
                 delimiter = '|'
                 quote = "\'"
                 #escape = '/'
-                copy_from_stmt = "COPY \"{0}\" FROM STDIN WITH CSV NULL '{1}'"\
-                    .format(table, null_value, quote, delimiter)
+                copy_from_stmt = "COPY \"{0}\" FROM STDIN WITH CSV NULL '{1}'".format(table, null_value) # , quote, delimiter)
                 cur.copy_expert(copy_from_stmt, fp_psql)
                               #columns=tuple(map(lambda c: '"'+str(c)+'"', columns)))
             conn.commit()
@@ -808,14 +825,10 @@ class ETLAlchemySource():
             upsertDict = {}
             self.logger.info("Gathering unique columns for upsert.")
             if len(pks) == 0:
-                s = "There is no primary key defined on table '{0}'!\n " +\
-                    "We are unable to Upsert into this table without " +\
-                    "identifying unique rows based on PKs!".format(T.name)
+                s = "There is no primary key defined on table '{0}'!\n We are unable to Upsert into this table without identifying unique rows based on PKs!".format(T.name)
                 raise Exception(s)
             unique_columns = filter(lambda c: c.name.lower() in pks, T.columns)
-            self.logger.info(
-                "Unique columns are '{0}'".format(
-                    str(unique_columns)))
+            self.logger.info("Unique columns are '{0}'".format(str(unique_columns)))
             q = select(unique_columns)
             rows = conn.execute(q).fetchall()
             for r in rows:
@@ -872,11 +885,7 @@ class ETLAlchemySource():
         conn.close()
     # TODO: Have a 'Create' option for each table...
 
-    def migrate(
-            self,
-            destination_database_url,
-            migrate_data=True,
-            migrate_schema=True):
+    def migrate(self, destination_database_url, migrate_data=True, migrate_schema=True):
         """"""""""""""""""""""""
         """ ** REFLECTION ** """
         """"""""""""""""""""""""
@@ -911,14 +920,12 @@ class ETLAlchemySource():
         TablesIterator = self.table_names  # defaults to ALL tables
 
         if self.included_tables and self.excluded_tables:
-            raise Exception("Can't provide 'included_tables'" +
-                            "'excluded_tables', choose 1...aborting...")
+            raise Exception("Can't provide 'included_tables'" + "'excluded_tables', choose 1...aborting...")
 
         if self.included_tables:
             TablesIterator = self.included_tables
         elif self.excluded_tables:
-            TablesIterator = list(set(TablesIterator) -
-                                  set(self.excluded_tables))
+            TablesIterator = list(set(TablesIterator) - set(self.excluded_tables))
        
         t_idx = -1
         t_total = len(TablesIterator)
@@ -943,12 +950,8 @@ class ETLAlchemySource():
             try:
                 self.src_insp.reflecttable(T_src, None)
             except NoSuchTableError as table:
-                self.logger.error(
-                    "Table '" +
-                    table +
-                    "' not found in DB: '" +
-                    destination +
-                    "'.")
+                # self.logger.error("Table '" + table + "' not found in DB: '" + destination + "'.")
+                self.logger.error("Table '" + table + "' not found in DB: '" + destination_database_url + "'.")
                 continue  # skip to next table...
             except sqlalchemy.exc.DBAPIError as e:
                 self.logger.error(str(e))
@@ -984,7 +987,7 @@ class ETLAlchemySource():
                 #########################################################
                 # Generate the mapping of 'column_name' -> 'list index'
                 ########################################################
-                cols = map(lambda c: c.name, T_src.columns)
+                cols = list(map(lambda c: c.name, T_src.columns))
                 self.current_ordered_table_columns = [None] * len(cols)
                 self.original_ordered_table_columns = [None] * len(cols)
                 for i in range(0, len(cols)):
@@ -1001,10 +1004,13 @@ class ETLAlchemySource():
                 cnt = self.engine.execute(T_src.count()).fetchone()[0]
                 resultProxy = self.engine.execute(T_src.select())
                 self.logger.info("Done. ({0} total rows)".format(str(cnt)))
-                j = 0
+                # j = 0
                 self.logger.info("Loading all rows into memory...")
                 rows = []
 
+                if T_src.name in self.per_table_buffers:
+                    buffer_size = self.per_table_buffers.get(T_src.name)
+                
                 for i in range(1, (cnt / buffer_size) + 1):
                     self.logger.info(
                         "Fetched {0} rows".format(str(i * buffer_size)))
@@ -1580,58 +1586,28 @@ class ETLAlchemySource():
                         creation_succesful = True
                     except sqlalchemy.exc.OperationalError as e:
                         # MySQL Exception
-                        self.logger.warning(
-                            str(e) + "\n ---> an FK on this table already " +
-                            "references the ref_table...appending '{0}' to" +
-                            " FK's name and trying again...".format(
-                                str(cnt)))
-                        cons = ForeignKeyConstraint(
-                            name=constraint_name +
-                            "_{0}".format(
-                                str(cnt)),
-                            columns=constrained_cols,
-                            refcolumns=referred_columns,
-                            table=T)
+                        self.logger.warning(str(e) + "\n ---> an FK on this table already references the ref_table...appending '{0}' to FK's name and trying again...".format(str(cnt)))
+                        cons = ForeignKeyConstraint(name=constraint_name +"_{0}".format(str(cnt)), columns=constrained_cols, refcolumns=referred_columns, table=T)
                         cnt += 1
                         if cnt == max_fks:
-                            self.logger.error(
-                                "FK creation was unsuccesful " +
-                                "(surpassed max number of FKs on 1 table" +
-                                "which all reference another table)")
+                            self.logger.error("FK creation was unsuccesful (surpassed max number of FKs on 1 table which all reference another table)")
                             self.skipped_fk_count += 1
                             break
                     except sqlalchemy.exc.ProgrammingError as e:
                         # PostgreSQL Exception
-                        self.logger.warning(
-                            str(e) +
-                            "\n ---> an FK on this table already references " +
-                            "the ref_table...appending '{0}' to FK's name " +
-                            "and trying again...".format(
-                                str(cnt)))
-                        cons = ForeignKeyConstraint(
-                            name=constraint_name +
-                            "_{0}".format(
-                                str(cnt)),
-                            columns=constrained_cols,
-                            refcolumns=referred_columns,
-                            table=T)
+                        self.logger.warning(str(e) +"\n ---> an FK on this table already references the ref_table...appending '{0}' to FK's name and trying again...".format(str(cnt)))
+                        cons = ForeignKeyConstraint(name=constraint_name +"_{0}".format(str(cnt)), columns=constrained_cols, refcolumns=referred_columns,table=T)
                         cnt += 1
                         if cnt == max_fks:
-                            self.logger.error(
-                               "FK creation was unsuccesful (surpassed max " +
-                               "number of FKs on 1 table which all reference" +
-                               " another table)")
+                            self.logger.error("FK creation was unsuccesful (surpassed max number of FKs on 1 table which all reference another table)")
                             self.skipped_fk_count += 1
                             break
 
                 self.fk_count += 1
             t_stop_constraint = datetime.now()
             constraint_dt = t_stop_constraint - t_start_constraint
-            constraint_dt_str = str(constraint_dt.seconds / 60) + "m:" +\
-                str(constraint_dt.seconds % 60) + "s"
-
-            self.times[pre_transformed_table_name][
-                'Constraint Time'] = constraint_dt_str
+            constraint_dt_str = str(constraint_dt.seconds / 60) + "m:" + str(constraint_dt.seconds % 60) + "s"
+            self.times[pre_transformed_table_name]['Constraint Time'] = constraint_dt_str
 
     def print_timings(self):
         stop = datetime.now()
@@ -1690,12 +1666,8 @@ class ETLAlchemySource():
             str(self.total_rows / ((dt.seconds / 60) or 1))))
         # self.logger.warning("Referential Integrity " +
         # "Violations: \n" + "\n".join(self.riv_arr))
-        self.logger.warning(
-            "Unique Constraint Violations: " +
-            "\n".join(
-                self.unique_constraint_violations))
-
-        self.logger.info("""
+        self.logger.warning("Unique Constraint Violations: " +"\n".join(self.unique_constraint_violations))
+        self.logger.info(r"""
        =========================
        === ** TIMING INFO ** ===
        =========================
@@ -1722,7 +1694,7 @@ class ETLAlchemySource():
             "Load Time (Into Target)",
             "Indexing Time",
             "Constraint Time"]
-        for (table_name, timings) in self.times.iteritems():
+        for (table_name, timings) in self.times.items():
             self.logger.info(table_name)
             for key in ordered_timings:
                 self.logger.info("-- " + str(key) + ": " +

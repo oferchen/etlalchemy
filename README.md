@@ -145,11 +145,6 @@ This project has [its origins](http://thelaziestprogrammer.com/migrating-between
 
 
 
-# Donations
-[Donations through Gratipay](https://gratipay.com/etlalchemy/) are welcome, but **Pull Requests** are better!
-
-You can also support us [via PayPal here.](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=DH544PY7RFSLA)
-
 # Other
 
 For help installing cx_Oracle on a Mac (El Capitan + cx_Oracle = Misery), [check out this blog post](http://thelaziestprogrammer.com/sharrington/databases/oracle/install-cx_oracle-mac) for help. 
